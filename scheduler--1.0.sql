@@ -3,16 +3,17 @@
 -- complain if script is sourced in psql, rather than via CREATE EXTENSION
 \echo Use "CREATE EXTENSION scheduler" to load this file. \quit
 
--- добавляем схемy, если её нет
+-- создаём схему и таблицу
 CREATE SCHEMA IF NOT EXISTS scheduler;
 
-CREATE TABLE IF NOT EXISTS scheduler.jobs (
+CREATE TABLE scheduler.jobs (
     job_id            SERIAL         PRIMARY KEY,
     job_name          TEXT           UNIQUE NOT NULL,
-    job_type          TEXT           NOT NULL CHECK (job_type IN ('sql','shell')),
+    job_type          TEXT           NOT NULL
+                         CHECK (job_type IN ('sql','shell')),
     command           TEXT           NOT NULL,
-    schedule_interval INTERVAL      NULL,    -- для повторяющихся
-    schedule_time     TIMESTAMPTZ    NULL,    -- для одноразовых
+    schedule_interval INTERVAL      NULL,
+    schedule_time     TIMESTAMPTZ    NULL,
     enabled           BOOLEAN        NOT NULL DEFAULT TRUE,
     last_run          TIMESTAMPTZ    NULL,
     next_run          TIMESTAMPTZ    NULL
@@ -26,6 +27,7 @@ ALTER TABLE scheduler.jobs
       (schedule_time     IS NOT NULL AND schedule_interval IS NULL)
     );
 
+-- триггер на заполнение next_run при INSERT
 CREATE OR REPLACE FUNCTION scheduler.set_next_run() RETURNS TRIGGER AS $$
 BEGIN
   IF NEW.schedule_interval IS NOT NULL THEN
@@ -42,58 +44,40 @@ CREATE TRIGGER trg_set_next_run
   BEFORE INSERT ON scheduler.jobs
   FOR EACH ROW EXECUTE FUNCTION scheduler.set_next_run();
 
--- Добавление/обновление повторяющейся задачи
+-- функции управления
 CREATE OR REPLACE FUNCTION scheduler.add_interval_job(
-    p_name TEXT,
-    p_type TEXT,
-    p_cmd  TEXT,
-    p_int  INTERVAL
+    p_name TEXT, p_cmd TEXT, p_int INTERVAL
 ) RETURNS VOID LANGUAGE plpgsql AS $$
 BEGIN
-  INSERT INTO scheduler.jobs(job_name,job_type,command,schedule_interval)
-    VALUES(p_name,p_type,p_cmd,p_int)
+  INSERT INTO scheduler.jobs(job_name, job_type, command, schedule_interval)
+    VALUES(p_name, 'sql', p_cmd, p_int)
   ON CONFLICT (job_name) DO UPDATE
-    SET job_type          = EXCLUDED.job_type,
-        command           = EXCLUDED.command,
+    SET command = EXCLUDED.command,
         schedule_interval = EXCLUDED.schedule_interval,
-        enabled           = TRUE;
+        enabled = TRUE;
 END;
 $$;
 
--- Добавление/обновление одноразовой задачи
-CREATE OR REPLACE FUNCTION scheduler.add_oneoff_job(
-    p_name TEXT,
-    p_type TEXT,
-    p_cmd  TEXT,
-    p_time TIMESTAMPTZ
+CREATE OR REPLACE FUNCTION scheduler.add_shell_job(
+    p_name TEXT, p_cmd TEXT, p_int INTERVAL
 ) RETURNS VOID LANGUAGE plpgsql AS $$
 BEGIN
-  INSERT INTO scheduler.jobs(job_name,job_type,command,schedule_time)
-    VALUES(p_name,p_type,p_cmd,p_time)
+  INSERT INTO scheduler.jobs(job_name, job_type, command, schedule_interval)
+    VALUES(p_name, 'shell', p_cmd, p_int)
   ON CONFLICT (job_name) DO UPDATE
-    SET job_type      = EXCLUDED.job_type,
-        command       = EXCLUDED.command,
-        schedule_time = EXCLUDED.schedule_time,
-        enabled       = TRUE;
+    SET command = EXCLUDED.command,
+        schedule_interval = EXCLUDED.schedule_interval,
+        enabled = TRUE;
 END;
 $$;
-
--- Включить/отключить/удалить/список
-CREATE OR REPLACE FUNCTION scheduler.enable_job(name TEXT)  RETURNS VOID LANGUAGE SQL AS $$UPDATE scheduler.jobs SET enabled=TRUE  WHERE job_name=name;$$;
-CREATE OR REPLACE FUNCTION scheduler.disable_job(name TEXT) RETURNS VOID LANGUAGE SQL AS $$UPDATE scheduler.jobs SET enabled=FALSE WHERE job_name=name;$$;
-CREATE OR REPLACE FUNCTION scheduler.delete_job(name TEXT)  RETURNS VOID LANGUAGE SQL AS $$DELETE FROM scheduler.jobs  WHERE job_name=name;$$;
 
 CREATE OR REPLACE FUNCTION scheduler.list_jobs() RETURNS TABLE(
-    job_id            INT,
-    job_name          TEXT,
-    job_type          TEXT,
-    command           TEXT,
-    schedule_interval INTERVAL,
-    schedule_time     TIMESTAMPTZ,
-    enabled           BOOLEAN,
-    last_run          TIMESTAMPTZ,
-    next_run          TIMESTAMPTZ
-) LANGUAGE SQL AS $$
-  SELECT job_id,job_name,job_type,command,schedule_interval,schedule_time,enabled,last_run,next_run
-    FROM scheduler.jobs ORDER BY job_id;
+    job_id INT, job_name TEXT, job_type TEXT, command TEXT,
+    schedule_interval INTERVAL, schedule_time TIMESTAMPTZ,
+    enabled BOOLEAN, last_run TIMESTAMPTZ, next_run TIMESTAMPTZ
+) LANGUAGE sql AS $$
+  SELECT job_id, job_name, job_type, command,
+         schedule_interval, schedule_time, enabled, last_run, next_run
+    FROM scheduler.jobs
+   ORDER BY job_id;
 $$;
