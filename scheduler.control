@@ -1,7 +1,7 @@
-# contrib/pg_scheduler/scheduler.control
+# scheduler.control
 
-comment         = 'Flexible SQL/shell job scheduler with interval and datetime tasks'
+comment = 'PostgreSQL Job Scheduler'
 default_version = '1.0'
 module_pathname = '$libdir/scheduler'
-relocatable     = true
-superuser       = true
+superuser = true
+relocatable = false

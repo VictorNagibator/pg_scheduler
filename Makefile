@@ -7,8 +7,7 @@ EXTENSION  = scheduler
 DATA       = scheduler--1.0.sql
 PGFILEDESC = "pg_scheduler - flexible SQL/shell job scheduler"
 
-# No extra libraries
-SHLIB_LINK = 
+SHLIB_LINK = -lpq
 
 ifdef USE_PGXS
 PG_CONFIG = pg_config
