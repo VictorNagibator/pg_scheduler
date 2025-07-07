@@ -1,0 +1,112 @@
+-- Supress NOTICE
+SET client_min_messages TO WARNING;
+-- Load extension
+CREATE EXTENSION IF NOT EXISTS scheduler;
+-- Clean up any existing jobs
+SELECT scheduler.delete_job(job_name) FROM scheduler.jobs;
+ delete_job 
+------------
+(0 rows)
+
+-- 1. Test ADD_JOB and retrieval
+SELECT scheduler.add_job('test_sql', 'sql', $$SELECT 1$$, '1 min', NULL, 2);
+ add_job 
+---------
+ 
+(1 row)
+
+-- Expect job created with name 'test_sql'
+SELECT job_name, job_type, schedule_interval, max_attempts
+  FROM scheduler.jobs WHERE job_name = 'test_sql';
+ job_name | job_type | schedule_interval | max_attempts 
+----------+----------+-------------------+--------------
+ test_sql | sql      | @ 1 min           |            2
+(1 row)
+
+-- 2. Test duplicate ADD_JOB updates existing job
+SELECT scheduler.add_job('test_sql', 'sql', $$SELECT 2$$, '2 min', NULL, 4);
+ add_job 
+---------
+ 
+(1 row)
+
+SELECT command, schedule_interval, max_attempts
+  FROM scheduler.jobs WHERE job_name = 'test_sql';
+ command  | schedule_interval | max_attempts 
+----------+-------------------+--------------
+ SELECT 2 | @ 2 mins          |            4
+(1 row)
+
+-- 3. Test TOGGLE_JOB disables and enables
+SELECT scheduler.toggle_job('test_sql', false);
+ toggle_job 
+------------
+ 
+(1 row)
+
+SELECT enabled FROM scheduler.jobs WHERE job_name = 'test_sql';
+ enabled 
+---------
+ f
+(1 row)
+
+SELECT scheduler.toggle_job('test_sql', true);
+ toggle_job 
+------------
+ 
+(1 row)
+
+SELECT enabled FROM scheduler.jobs WHERE job_name = 'test_sql';
+ enabled 
+---------
+ t
+(1 row)
+
+-- 4. Test DELETE_JOB removes job
+SELECT scheduler.delete_job('test_sql');
+ delete_job 
+------------
+ 
+(1 row)
+
+-- Next line should return 0 rows
+SELECT * FROM scheduler.jobs WHERE job_name = 'test_sql';
+ job_id | job_name | job_type | command | schedule_interval | schedule_time | enabled | last_run | next_run | last_status | last_message | max_attempts | current_attempts | created_at | updated_at 
+--------+----------+----------+---------+-------------------+---------------+---------+----------+----------+-------------+--------------+--------------+------------------+------------+------------
+(0 rows)
+
+-- 5. Test EXECUTE_JOB logging and retry
+-- Create a helper table
+CREATE TABLE scheduler.test_data(id serial primary key, marker text);
+-- Add a shell job that appends to test_data
+SELECT scheduler.add_job(
+  'test_shell', 'shell', 'echo hello >> /tmp/scheduler_test.log', NULL, NOW(), 1
+);
+ add_job 
+---------
+ 
+(1 row)
+
+-- Directly invoke execution; expect job_log entry
+SELECT scheduler.execute_job((SELECT job_id FROM scheduler.jobs WHERE job_name = 'test_shell'));
+ execute_job 
+-------------
+ 
+(1 row)
+
+-- Verify job_logs
+SELECT status, message FROM scheduler.job_logs
+  WHERE job_id = (SELECT job_id FROM scheduler.jobs WHERE job_name = 'test_shell');
+ status | message 
+--------+---------
+ t      | Success
+(1 row)
+
+-- 6. Cleanup
+DROP TABLE scheduler.test_data;
+SELECT scheduler.delete_job('test_shell');
+ delete_job 
+------------
+ 
+(1 row)
+
