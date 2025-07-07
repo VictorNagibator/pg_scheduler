@@ -3,27 +3,29 @@
 -- Complain if script is sourced in psql, rather than via CREATE EXTENSION
 \echo Use "CREATE EXTENSION scheduler" to load this file. \quit
 
--- Create dedicated schema for scheduler objects
+/* Create dedicated scheduler schema */
 CREATE SCHEMA scheduler;
 
-/**
- * Main jobs table storing task definitions and state
+/*-------------------------------------------------------------------------
+ * JOBS TABLE: Core job definitions and state tracking
+ * 
  * Columns:
- *   job_id           - Auto-generated unique job identifier
- *   job_name         - Human-readable unique job name
- *   job_type         - Execution type: 'sql' or 'shell'
- *   command          - SQL statement or shell command to execute
- *   schedule_interval- Recurring execution interval (NULL for one-time jobs)
- *   schedule_time    - Specific execution time (NULL for recurring jobs)
- *   enabled          - Job activation status
- *   last_run         - Timestamp of last execution attempt
- *   next_run         - Calculated next execution time
- *   last_status      - Result of last execution (true = success)
+ *   job_id           - Auto-incrementing unique identifier
+ *   job_name         - Unique human-readable identifier
+ *   job_type         - 'sql' or 'shell'
+ *   command          - SQL statement or shell command
+ *   schedule_interval- Recurring interval (e.g., '1 h', '7 d', '1 mon')
+ *   schedule_time    - Specific start time for recurring jobs
+ *   enabled          - Whether job is active
+ *   last_run         - Timestamp of last execution
+ *   next_run         - Next scheduled execution time
+ *   last_status      - Success status of last run
  *   last_message     - Error message from last failure
- *   max_attempts     - Maximum retries before disabling job
- *   current_attempts - Current consecutive failure count
- *   created_at       - Job creation timestamp
- *   updated_at       - Last modification timestamp
+ *   max_attempts     - Maximum retries before disabling
+ *   current_attempts - Current consecutive failures
+ *   created_at       - Timestamp of job creation
+ *   updated_at       - Timestamp of last modification
+ *-------------------------------------------------------------------------
  */
 CREATE TABLE scheduler.jobs (
     job_id            SERIAL         PRIMARY KEY,
@@ -43,15 +45,20 @@ CREATE TABLE scheduler.jobs (
     updated_at        TIMESTAMPTZ    NOT NULL DEFAULT NOW()
 );
 
-/**
- * Execution log table tracking job runs
+COMMENT ON TABLE scheduler.jobs IS 'Job definitions and current state';
+COMMENT ON COLUMN scheduler.jobs.schedule_time IS 'Initial execution time for recurring jobs';
+
+/*-------------------------------------------------------------------------
+ * JOB_LOGS TABLE: Execution history
+ * 
  * Columns:
- *   log_id    - Auto-generated log identifier
+ *   log_id    - Auto-incrementing log identifier
  *   job_id    - Reference to jobs table
  *   run_time  - Actual execution start time
- *   status    - Execution result (true = success)
- *   message   - Detailed output or error message
- *   duration  - Execution time measured by system clock
+ *   status    - Success status
+ *   message   - Output or error message
+ *   duration  - Execution duration
+ *-------------------------------------------------------------------------
  */
 CREATE TABLE scheduler.job_logs (
     log_id        SERIAL         PRIMARY KEY,
@@ -62,9 +69,14 @@ CREATE TABLE scheduler.job_logs (
     duration      INTERVAL       NULL
 );
 
-/**
- * Automatic timestamp update function
- * Used in trigger to maintain updated_at column
+COMMENT ON TABLE scheduler.job_logs IS 'Historical job execution records';
+
+/*-------------------------------------------------------------------------
+ * UPDATE_TIMESTAMP() - Maintain updated_at column
+ * 
+ * Trigger function to automatically update updated_at column
+ * on any modification to jobs table.
+ *-------------------------------------------------------------------------
  */
 CREATE OR REPLACE FUNCTION scheduler.update_timestamp() 
 RETURNS TRIGGER AS $$
@@ -74,24 +86,39 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Apply timestamp trigger to jobs table
+/* Apply timestamp trigger */
 CREATE TRIGGER trg_jobs_timestamp
 BEFORE UPDATE ON scheduler.jobs
 FOR EACH ROW EXECUTE FUNCTION scheduler.update_timestamp();
 
-/**
- * Next-run calculator function
- * For recurring jobs: next_run = NOW() + interval
- * For one-time jobs: next_run = schedule_time
- * Disabled jobs have next_run = NULL
+/*-------------------------------------------------------------------------
+ * SET_NEXT_RUN() - Calculate next execution time
+ * 
+ * Computes next_run based on:
+ *   - For recurring jobs with schedule_time: 
+ *        First run at schedule_time, subsequent at interval
+ *   - For recurring jobs without schedule_time: 
+ *        First run immediately, subsequent at interval
+ *   - For one-time jobs: next_run = schedule_time
+ *-------------------------------------------------------------------------
  */
 CREATE OR REPLACE FUNCTION scheduler.set_next_run() RETURNS TRIGGER AS $$
 BEGIN
   IF NEW.enabled THEN
     NEW.next_run := 
         CASE 
-            WHEN NEW.schedule_interval IS NOT NULL THEN NOW() + NEW.schedule_interval
-            ELSE NEW.schedule_time
+            /* Recurring job with start time */
+            WHEN NEW.schedule_interval IS NOT NULL AND NEW.schedule_time IS NOT NULL THEN
+                CASE 
+                    WHEN NEW.schedule_time > NOW() THEN NEW.schedule_time
+                    ELSE NOW() + NEW.schedule_interval
+                END
+            /* Recurring job without start time */
+            WHEN NEW.schedule_interval IS NOT NULL THEN 
+                NOW() + NEW.schedule_interval
+            /* One-time job */
+            ELSE 
+                NEW.schedule_time
         END;
   ELSE
     NEW.next_run := NULL;
@@ -100,24 +127,24 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Apply next-run calculation on insert/update
+/* Apply next-run calculation */
 CREATE TRIGGER trg_set_next_run
 BEFORE INSERT OR UPDATE ON scheduler.jobs
 FOR EACH ROW EXECUTE FUNCTION scheduler.set_next_run();
 
-/**
- * Add or update job definition
- * Parameters:
- *   p_name      - Unique job name
- *   p_type      - 'sql' or 'shell'
- *   p_cmd       - Command to execute
- *   p_interval  - Recurring interval (optional)
- *   p_time      - Specific execution time (optional)
- *   p_max_attempts - Max retry attempts (default 3)
+/*-------------------------------------------------------------------------
+ * ADD_JOB() - Create or update job definition
  * 
- * On conflict (job_name):
- *   - Update existing job parameters
- *   - Reset state (enabled, current_attempts)
+ * Parameters:
+ *   p_name       - Unique job name
+ *   p_type       - 'sql' or 'shell'
+ *   p_cmd        - Command to execute
+ *   p_interval   - Recurring interval (optional)
+ *   p_time       - Specific start time (optional)
+ *   p_max_attempts - Max retries (default 3)
+ * 
+ * On conflict (job_name) updates existing job and resets state
+ *-------------------------------------------------------------------------
  */
 CREATE OR REPLACE FUNCTION scheduler.add_job(
     p_name TEXT, 
@@ -155,13 +182,17 @@ BEGIN
 END;
 $$;
 
-/**
- * Enable/disable job by name
+COMMENT ON FUNCTION scheduler.add_job IS 'Create or update job definition';
+
+/*-------------------------------------------------------------------------
+ * TOGGLE_JOB() - Enable/disable job by name
+ * 
  * Parameters:
  *   p_name    - Job name to modify
  *   p_enabled - Target state (true = enabled)
  * 
  * Throws exception if job not found
+ *-------------------------------------------------------------------------
  */
 CREATE OR REPLACE FUNCTION scheduler.toggle_job(
     p_name TEXT, 
@@ -178,12 +209,16 @@ BEGIN
 END;
 $$;
 
-/**
- * Permanently delete job and associated logs
+COMMENT ON FUNCTION scheduler.toggle_job IS 'Enable or disable job by name';
+
+/*-------------------------------------------------------------------------
+ * DELETE_JOB() - Remove job and associated logs
+ * 
  * Parameters:
- *   p_name - Job name to remove
+ *   p_name - Job name to delete
  * 
  * Throws exception if job not found
+ *-------------------------------------------------------------------------
  */
 CREATE OR REPLACE FUNCTION scheduler.delete_job(p_name TEXT) 
 RETURNS VOID LANGUAGE plpgsql AS $$
@@ -197,20 +232,21 @@ BEGIN
 END;
 $$;
 
-/**
- * Core job execution function
+COMMENT ON FUNCTION scheduler.delete_job IS 'Permanently remove job';
+
+/*-------------------------------------------------------------------------
+ * EXECUTE_JOB() - Core job execution function
+ * 
  * Parameters:
  *   target_job_id - ID of job to execute
  * 
- * Behavior:
- *   1. Checks job exists and is enabled
- *   2. Executes SQL command directly or shell command via COPY PROGRAM
- *   3. Updates job state:
- *        - Resets attempts on success
- *        - Increments attempts on failure
- *        - Disables job after max_attempts failures
- *   4. Calculates next run time for recurring jobs
- *   5. Logs execution details in job_logs
+ * Functionality:
+ *   1. Locks job row for update
+ *   2. Executes command based on job_type
+ *   3. Updates job status and next_run
+ *   4. Inserts execution log
+ *   5. Disables job after max_attempts failures
+ *-------------------------------------------------------------------------
  */
 CREATE OR REPLACE FUNCTION scheduler.execute_job(target_job_id INT)
 RETURNS VOID LANGUAGE plpgsql AS $$
@@ -223,7 +259,7 @@ DECLARE
     result_message TEXT;
     sql_cmd TEXT;
 BEGIN
-    -- Get job details with lock
+    /* Lock job row for update */
     SELECT * INTO job_rec 
     FROM scheduler.jobs 
     WHERE job_id = target_job_id
@@ -233,36 +269,36 @@ BEGIN
         RAISE EXCEPTION 'Job % not found', target_job_id;
     END IF;
     
-    -- Skip if job disabled
+    /* Skip if job disabled */
     IF NOT job_rec.enabled THEN
         RETURN;
     END IF;
     
-    -- Initialize execution variables
+    /* Initialize execution variables */
     start_time := clock_timestamp();
     result_status := TRUE;
     result_message := 'Success';
     
-    -- Execute based on job type
+    /* Execute command based on type */
     BEGIN
         IF job_rec.job_type = 'sql' THEN
-            EXECUTE job_rec.command;  -- Dynamic SQL execution
+            EXECUTE job_rec.command;
         ELSIF job_rec.job_type = 'shell' THEN
-            -- Safe execution via COPY PROGRAM
+            /* Safe execution via COPY PROGRAM */
             sql_cmd := format('COPY (SELECT 1) TO PROGRAM %L', job_rec.command);
             EXECUTE sql_cmd;
         END IF;
     EXCEPTION
         WHEN OTHERS THEN
             result_status := FALSE;
-            result_message := SQLERRM;  -- Capture PostgreSQL error
+            result_message := SQLERRM;
     END;
     
-    -- Calculate duration
+    /* Calculate duration */
     end_time := clock_timestamp();
     duration := end_time - start_time;
     
-    -- Update job status and compute next run
+    /* Update job status and compute next run */
     UPDATE scheduler.jobs
     SET 
         last_run = start_time,
@@ -283,7 +319,7 @@ BEGIN
         END
     WHERE job_id = job_rec.job_id;
     
-    -- Log execution
+    /* Log execution */
     INSERT INTO scheduler.job_logs(
         job_id, 
         run_time, 
@@ -300,14 +336,16 @@ BEGIN
 END;
 $$;
 
-/**
- * Convenience function for shell command execution
+COMMENT ON FUNCTION scheduler.execute_job IS 'Internal job execution function';
+
+/*-------------------------------------------------------------------------
+ * EXECUTE_SHELL_COMMAND() - Convenience function for shell commands
+ * 
  * Parameters:
  *   cmd - Shell command to execute
  * 
- * Implementation:
- *   Uses PostgreSQL's COPY PROGRAM feature to safely execute
- *   OS commands in a controlled environment
+ * Uses COPY PROGRAM for safe execution of OS commands.
+ *-------------------------------------------------------------------------
  */
 CREATE OR REPLACE FUNCTION scheduler.execute_shell_command(cmd TEXT)
 RETURNS VOID LANGUAGE plpgsql AS $$
@@ -315,3 +353,5 @@ BEGIN
     EXECUTE format('COPY (SELECT 1) TO PROGRAM %L', cmd);
 END;
 $$;
+
+COMMENT ON FUNCTION scheduler.execute_shell_command IS 'Execute OS command safely';

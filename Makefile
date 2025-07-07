@@ -9,6 +9,10 @@ PGFILEDESC = "pg_scheduler - flexible SQL/shell job scheduler"
 
 SHLIB_LINK = -lpq
 
+# Добавляем флаги компиляции по умолчанию
+PG_CPPFLAGS = -I$(shell pg_config --includedir)
+CFLAGS = -g -O0
+
 ifdef USE_PGXS
 PG_CONFIG = pg_config
 PGXS     := $(shell $(PG_CONFIG) --pgxs)
