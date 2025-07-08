@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * contrib/pg_scheduler/scheduler.c - PostgreSQL Background Worker for Job Scheduling
+ * contrib/scheduler/scheduler.c - PostgreSQL Background Worker for Job Scheduling
  *
  * Implements a job scheduler with support for SQL and shell commands,
  * flexible scheduling intervals, and detailed execution logging.

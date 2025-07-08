@@ -1,16 +1,17 @@
 # PostgreSQL Job Scheduler Extension
 EXTENSION = scheduler
-MODULE_big = scheduler
 DATA = scheduler--1.0.sql
 PGFILEDESC = "pg_scheduler - flexible SQL/shell job scheduler"
 
+# needs 'cause of libpq library 
+MODULE_big = scheduler 
 OBJS = \
     $(WIN32RES) \
     scheduler.o
 
 SHLIB_LINK = -lpq
+
 PG_CPPFLAGS = -I$(shell pg_config --includedir) -I.
-CFLAGS = -g -O0 -Wall -Wextra
 
 REGRESS = scheduler-test
 REGRESS_OPTS = \
