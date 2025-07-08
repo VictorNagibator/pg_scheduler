@@ -17,8 +17,6 @@ REGRESS_OPTS = \
     --inputdir=./ \
     --load-extension=scheduler
 
-PG_TAP_TESTS = t/001_scheduler.pl
-
 ifdef USE_PGXS
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)

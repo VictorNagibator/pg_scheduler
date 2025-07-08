@@ -1,7 +1,3 @@
--- Supress NOTICE
-SET client_min_messages TO WARNING;
--- Load extension
-CREATE EXTENSION IF NOT EXISTS scheduler;
 -- Clean up any existing jobs
 SELECT scheduler.delete_job(job_name) FROM scheduler.jobs;
  delete_job 
