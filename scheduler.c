@@ -24,6 +24,7 @@
 #include <stdint.h>
 #include <limits.h>
 #include <string.h>
+#include <errno.h>
 
 PG_MODULE_MAGIC;
 
@@ -61,48 +62,120 @@ static void notice_processor(void *arg, const char *message) {
  */
 static void parse_wake_interval(void) {
     char *endptr;
+    errno = 0;  // Reset errno before call
     long long sec = strtoll(scheduler_wake_interval, &endptr, 10);
     
-    if (endptr == scheduler_wake_interval || sec < 0) {
+    // Handle parsing errors and negative values
+    if (errno == ERANGE || endptr == scheduler_wake_interval || sec < 0) {
         elog(WARNING, "Invalid interval format '%s', using default 10s", 
              scheduler_wake_interval);
         scheduler_sleep_us = 10 * 1000000L;
         return;
     }
     
-    long long micros = 0;
-    const long long US_PER_SEC = 1000000LL;
+    const int64 US_PER_SEC = 1000000;
+    int64 micros = 0;
+    bool overflow = false;
 
-    /* Handle different interval units */
+    /* Handle different interval units with overflow protection */
     if (strcmp(endptr, "s") == 0 || *endptr == '\0') {
-        micros = sec * US_PER_SEC;
-    } else if (strcmp(endptr, "min") == 0) {
-        micros = sec * 60LL * US_PER_SEC;
-    } else if (strcmp(endptr, "h") == 0) {
-        micros = sec * 3600LL * US_PER_SEC;
-    } else if (strcmp(endptr, "d") == 0) {
-        micros = sec * 86400LL * US_PER_SEC;
-    } else if (strcmp(endptr, "w") == 0) {
-        micros = sec * 7LL * 86400LL * US_PER_SEC;
-    } else if (strcmp(endptr, "mon") == 0) {
-        micros = sec * 30LL * 86400LL * US_PER_SEC; /* Approximate month */
-    } else {
+        // Check for overflow: sec * US_PER_SEC > INT64_MAX
+        if (sec > 0 && US_PER_SEC > INT64_MAX / sec) {
+            overflow = true;
+        } else {
+            micros = sec * US_PER_SEC;
+        }
+    } 
+    else if (strcmp(endptr, "min") == 0) {
+        const int64 MIN_IN_SEC = 60;
+        // First check: sec * MIN_IN_SEC
+        if (sec > 0 && MIN_IN_SEC > INT64_MAX / sec) {
+            overflow = true;
+        } else {
+            int64 total_sec = sec * MIN_IN_SEC;
+            // Second check: total_sec * US_PER_SEC
+            if (total_sec > 0 && US_PER_SEC > INT64_MAX / total_sec) {
+                overflow = true;
+            } else {
+                micros = total_sec * US_PER_SEC;
+            }
+        }
+    } 
+    else if (strcmp(endptr, "h") == 0) {
+        const int64 HOUR_IN_SEC = 3600;
+        if (sec > 0 && HOUR_IN_SEC > INT64_MAX / sec) {
+            overflow = true;
+        } else {
+            int64 total_sec = sec * HOUR_IN_SEC;
+            if (total_sec > 0 && US_PER_SEC > INT64_MAX / total_sec) {
+                overflow = true;
+            } else {
+                micros = total_sec * US_PER_SEC;
+            }
+        }
+    } 
+    else if (strcmp(endptr, "d") == 0) {
+        const int64 DAY_IN_SEC = 86400;
+        if (sec > 0 && DAY_IN_SEC > INT64_MAX / sec) {
+            overflow = true;
+        } else {
+            int64 total_sec = sec * DAY_IN_SEC;
+            if (total_sec > 0 && US_PER_SEC > INT64_MAX / total_sec) {
+                overflow = true;
+            } else {
+                micros = total_sec * US_PER_SEC;
+            }
+        }
+    } 
+    else if (strcmp(endptr, "w") == 0) {
+        const int64 WEEK_IN_SEC = 7 * 86400;
+        if (sec > 0 && WEEK_IN_SEC > INT64_MAX / sec) {
+            overflow = true;
+        } else {
+            int64 total_sec = sec * WEEK_IN_SEC;
+            if (total_sec > 0 && US_PER_SEC > INT64_MAX / total_sec) {
+                overflow = true;
+            } else {
+                micros = total_sec * US_PER_SEC;
+            }
+        }
+    } 
+    else if (strcmp(endptr, "mon") == 0) {
+        const int64 MONTH_IN_SEC = 30 * 86400;
+        if (sec > 0 && MONTH_IN_SEC > INT64_MAX / sec) {
+            overflow = true;
+        } else {
+            int64 total_sec = sec * MONTH_IN_SEC;
+            if (total_sec > 0 && US_PER_SEC > INT64_MAX / total_sec) {
+                overflow = true;
+            } else {
+                micros = total_sec * US_PER_SEC;
+            }
+        }
+    } 
+    else {
         elog(WARNING, "Unknown interval unit '%s', using seconds", endptr);
-        micros = sec * US_PER_SEC;
+        if (sec > 0 && US_PER_SEC > INT64_MAX / sec) {
+            overflow = true;
+        } else {
+            micros = sec * US_PER_SEC;
+        }
     }
     
+    /* Handle overflow cases */
+    if (overflow) {
+        elog(WARNING, "Interval value overflow, using maximum");
+        scheduler_sleep_us = INT64_MAX;
+    } 
     /* Validate and set computed interval */
-    if (micros < 0) {
+    else if (micros < 0) {
         elog(WARNING, "Negative interval computed, using default");
         scheduler_sleep_us = 10 * 1000000L;
-    } else if (micros > INT64_MAX) {
-        elog(WARNING, "Interval too large, setting to maximum value");
-        scheduler_sleep_us = INT64_MAX;
     } else {
-        scheduler_sleep_us = (int64) micros;
+        scheduler_sleep_us = micros;
     }
     
-    elog(DEBUG1, "[scheduler] Wake interval set to %lld microseconds", micros);
+    elog(DEBUG1, "[scheduler] Wake interval set to %lld microseconds", (long long)micros);
 }
 
 /**
