@@ -15,7 +15,7 @@
 
 ## Prerequisites
 
-* PostgreSQL 16 or later
+* PostgreSQL
 * C compiler
 * PostgreSQL server development headers and libraries
 
@@ -84,6 +84,49 @@ Stores job definitions and next-run state:
 | `created_at`        | `TIMESTAMPTZ` | Creation timestamp                     |
 | `updated_at`        | `TIMESTAMPTZ` | Last modification timestamp            |
 
+## Time Notation Conventions
+
+When configuring scheduling intervals via GUC or SQL functions, time units must follow these rules:
+
+1) Use an integer value immediately followed by a unit abbreviation, without spaces (e.g., `10s`, `5min`, `1h`).
+
+2) Supported units:
+
+   - `s` — seconds
+   
+   - `min` — minutes (60 seconds)
+   
+   - `h` — hours (3,600 seconds)
+   
+   - `d` — days (86,400 seconds)
+   
+   - `w` — weeks (7 days)
+   
+   - `mon` — months (30 days approximation)
+
+3) If no unit is provided, seconds are assumed (e.g., `10` is treated as `10s`).
+
+4) Intervals passed to SQL functions must conform to PostgreSQL interval syntax (e.g., `'1 day'`, `'30 minutes'`).
+
+## Additional GUC Parameters
+
+The scheduler extension exposes several custom GUC settings for advanced configuration. These can be set in `postgresql.conf` or via SQL:
+
+- `scheduler.wake_interval` (string, default: '10s')
+
+   Interval between scheduler polling cycles. Accepts same time notation as above.
+
+- `scheduler.database` (string, default: 'postgres')
+
+   Name of the database containing the scheduler schema and job tables.
+
+To customize, add entries such as:
+
+```sh
+scheduler.wake_interval = '30s'
+scheduler.database = 'analytics'
+```
+
 ## Usage Examples
 
 ### Adding a Recurring SQL Job
@@ -145,5 +188,7 @@ A `scheduler-test.sql` script is provided for regression tests. To execute it:
 ```sh
 make USE_PGXS=1 installcheck
 ```
+
+**Note**: Ensure that `pg_config` is in your `PATH`, so that make `USE_PGXS=1` can locate PostgreSQL build settings.
 
 This will run `pg_regress` with the test script to validate correct behavior.
