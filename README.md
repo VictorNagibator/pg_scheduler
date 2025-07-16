@@ -54,13 +54,13 @@
 
 All PL/pgSQL functions reside in the `scheduler` schema:
 
-| Function                                                                 | Description                                 |
-| ------------------------------------------------------------------------ | ------------------------------------------- |
-| `scheduler.add_job(name, type, cmd, interval, start_time, max_attempts)` | Add or update a job definition.             |
-| `scheduler.toggle_job(name, enabled)`                                    | Enable or disable a job by name.            |
-| `scheduler.delete_job(name)`                                             | Remove a job and its logs.                  |
-| `scheduler.execute_job(job_id)`                                          | Manually execute a job (for testing).       |
-| `scheduler.execute_shell_command(cmd)`                                   | Execute a shell command via `COPY PROGRAM`. |
+| Function                                                                           | Description                                 |
+| ---------------------------------------------------------------------------------- | ------------------------------------------- |
+| `scheduler.add_or_update_job(name, type, cmd, interval, start_time, max_attempts)` | Add or update a job definition.             |
+| `scheduler.toggle_job(name, enabled)`                                              | Enable or disable a job by name.            |
+| `scheduler.delete_job(name)`                                                       | Remove a job and its logs.                  |
+| `scheduler.execute_job(job_id)`                                                    | Manually execute a job (for testing).       |
+| `scheduler.execute_shell_command(cmd)`                                             | Execute a shell command via `COPY PROGRAM`. |
 
 ### Table: `scheduler.jobs`
 
@@ -132,7 +132,7 @@ scheduler.database = 'analytics'
 ### Adding a Recurring SQL Job
 
 ```sql
-SELECT scheduler.add_job(
+SELECT scheduler.add_or_update_job(
     'cleanup_old_records',
     'sql',
     $$DELETE FROM audit_logs WHERE created_at < NOW() - INTERVAL '30 days'$$,
@@ -145,7 +145,7 @@ SELECT scheduler.add_job(
 ### Adding a One-Time Shell Job
 
 ```sql
-SELECT scheduler.add_job(
+SELECT scheduler.add_or_update_job(
     'notify_backup',
     'shell',
     'echo Backup completed | mail -s "Backup" admin@example.com',
