@@ -1,14 +1,15 @@
 -- Clean up any existing jobs
-SELECT scheduler.delete_job(job_name) FROM scheduler.jobs;
+DELETE FROM scheduler.job_logs;
+DELETE FROM scheduler.jobs;
 
 -- 1. Test ADD_JOB and retrieval
-SELECT scheduler.add_job('test_sql', 'sql', $$SELECT 1$$, '1 min', NULL, 2);
+SELECT scheduler.add_or_update_job('test_sql', 'sql', $$SELECT 1$$, '1 min', NULL, 2);
 -- Expect job created with name 'test_sql'
 SELECT job_name, job_type, schedule_interval, max_attempts
   FROM scheduler.jobs WHERE job_name = 'test_sql';
 
 -- 2. Test duplicate ADD_JOB updates existing job
-SELECT scheduler.add_job('test_sql', 'sql', $$SELECT 2$$, '2 min', NULL, 4);
+SELECT scheduler.add_or_update_job('test_sql', 'sql', $$SELECT 2$$, '2 min', NULL, 4);
 SELECT command, schedule_interval, max_attempts
   FROM scheduler.jobs WHERE job_name = 'test_sql';
 
@@ -28,7 +29,7 @@ SELECT * FROM scheduler.jobs WHERE job_name = 'test_sql';
 CREATE TABLE scheduler.test_data(id serial primary key, marker text);
 
 -- Add a shell job that appends to test_data
-SELECT scheduler.add_job(
+SELECT scheduler.add_or_update_job(
   'test_shell', 'shell', 'echo hello >> /tmp/scheduler_test.log', NULL, NOW(), 1
 );
 

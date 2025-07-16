@@ -133,7 +133,7 @@ BEFORE INSERT OR UPDATE ON scheduler.jobs
 FOR EACH ROW EXECUTE FUNCTION scheduler.set_next_run();
 
 /*-------------------------------------------------------------------------
- * ADD_JOB() - Create or update job definition
+ * ADD_OR_UPDATE_JOB() - Create or update job definition
  * 
  * Parameters:
  *   p_name       - Unique job name
@@ -146,43 +146,59 @@ FOR EACH ROW EXECUTE FUNCTION scheduler.set_next_run();
  * On conflict (job_name) updates existing job and resets state
  *-------------------------------------------------------------------------
  */
-CREATE OR REPLACE FUNCTION scheduler.add_job(
+CREATE OR REPLACE FUNCTION scheduler.add_or_update_job(
     p_name TEXT, 
     p_type TEXT, 
     p_cmd TEXT, 
     p_interval INTERVAL = NULL, 
     p_time TIMESTAMPTZ = NULL,
     p_max_attempts INT = 3
-) RETURNS VOID LANGUAGE plpgsql AS $$
+) RETURNS TEXT LANGUAGE plpgsql AS $$
+DECLARE
+    action TEXT;
+    job_exists BOOLEAN;
 BEGIN
-  INSERT INTO scheduler.jobs(
-      job_name, 
-      job_type, 
-      command, 
-      schedule_interval, 
-      schedule_time,
-      max_attempts
-  )
-  VALUES (
-      p_name, 
-      p_type, 
-      p_cmd, 
-      p_interval, 
-      p_time,
-      p_max_attempts
-  )
-  ON CONFLICT (job_name) DO UPDATE SET
-    job_type = EXCLUDED.job_type,
-    command = EXCLUDED.command,
-    schedule_interval = EXCLUDED.schedule_interval,
-    schedule_time = EXCLUDED.schedule_time,
-    max_attempts = EXCLUDED.max_attempts,
-    enabled = TRUE,
-    current_attempts = 0;
+    -- Check if this task exists
+    SELECT EXISTS(SELECT 1 FROM scheduler.jobs WHERE job_name = p_name) INTO job_exists;
+    
+    INSERT INTO scheduler.jobs(
+        job_name, 
+        job_type, 
+        command, 
+        schedule_interval, 
+        schedule_time,
+        max_attempts
+    )
+    VALUES (
+        p_name, 
+        p_type, 
+        p_cmd, 
+        p_interval, 
+        p_time,
+        p_max_attempts
+    )
+    ON CONFLICT (job_name) DO UPDATE SET
+        job_type = EXCLUDED.job_type,
+        command = EXCLUDED.command,
+        schedule_interval = EXCLUDED.schedule_interval,
+        schedule_time = EXCLUDED.schedule_time,
+        max_attempts = EXCLUDED.max_attempts,
+        enabled = TRUE,
+        current_attempts = 0;
+    
+    -- Choose action
+    IF job_exists THEN
+        action := 'updated';
+    ELSE
+        action := 'created';
+    END IF;
+    
+    RAISE NOTICE 'Job "%" % successfully', p_name, action;
+    RETURN action;
 END;
 $$;
 
-COMMENT ON FUNCTION scheduler.add_job IS 'Create or update job definition';
+COMMENT ON FUNCTION scheduler.add_or_update_job IS 'Create or update job definition';
 
 /*-------------------------------------------------------------------------
  * TOGGLE_JOB() - Enable/disable job by name
@@ -269,8 +285,10 @@ BEGIN
         RAISE EXCEPTION 'Job % not found', target_job_id;
     END IF;
     
-    /* Skip if job disabled */
+    /* Notice and skip if job disabled */
     IF NOT job_rec.enabled THEN
+        RAISE NOTICE 'Job "%" (ID: %) is disabled. Skipping execution.', 
+                 job_rec.job_name, job_rec.job_id;
         RETURN;
     END IF;
     
