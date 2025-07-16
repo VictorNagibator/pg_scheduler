@@ -4,10 +4,8 @@ DATA = scheduler--1.0.sql
 PGFILEDESC = "pg_scheduler - flexible SQL/shell job scheduler"
 
 # needs 'cause of libpq library 
-MODULE_big = scheduler 
-OBJS = \
-    $(WIN32RES) \
-    scheduler.o
+MODULE_big = scheduler
+OBJS = scheduler.o
 
 SHLIB_LINK = -lpq
 

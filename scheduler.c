@@ -15,12 +15,16 @@
 #include "fmgr.h"
 #include "miscadmin.h"
 #include "postmaster/bgworker.h"
+#include "postmaster/interrupt.h"
 #include "utils/guc.h"
 #include "utils/elog.h"
+#include "utils/wait_event_types.h"
 #include "storage/latch.h"
 #include "storage/proc.h"
 #include "storage/ipc.h"
 #include "libpq-fe.h"
+#include "libpq/pqsignal.h"
+#include "tcop/utility.h"
 #include <stdint.h>
 #include <limits.h>
 #include <string.h>
@@ -185,8 +189,13 @@ static void parse_wake_interval(void) {
  * the shared library is loaded by PostgreSQL (shared_preload_libraries = 'scheduler'). 
  */
 void _PG_init(void) {
+    /* Require loading via shared_preload_libraries */
+    if (!process_shared_preload_libraries_in_progress) {
+        elog(WARNING, "scheduler module must be loaded via shared_preload_libraries");
+        return;
+    }
+
     BackgroundWorker worker;
-    MemSet(&worker, 0, sizeof(BackgroundWorker));
 
     /* Register GUC parameters */
     DefineCustomStringVariable(
@@ -195,7 +204,7 @@ void _PG_init(void) {
         "Determines scheduler polling frequency. Units: s, min, h, d, w, mon.",
         &scheduler_wake_interval,
         "10s",
-        PGC_POSTMASTER,
+        PGC_SIGHUP, // Dynamic configuration is available :)
         0,
         NULL, NULL, NULL
     );
@@ -206,7 +215,7 @@ void _PG_init(void) {
         "Must have 'scheduler' schema with job definitions.",
         &scheduler_database,
         "postgres",
-        PGC_POSTMASTER,
+        PGC_SIGHUP,
         0,
         NULL, NULL, NULL
     );
@@ -215,9 +224,13 @@ void _PG_init(void) {
     parse_wake_interval();
 
     /* Configure background worker */
+    MemSet(&worker, 0, sizeof(BackgroundWorker));
+    /* Allow shared memory access and database connection */
     worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
+    /* Start after recovery finishes */
     worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
-    worker.bgw_restart_time = 5;  /* Restart delay after crash (seconds) */
+    /* Restart delay after crash (seconds) */
+    worker.bgw_restart_time = 5;
     strncpy(worker.bgw_function_name, "scheduler_main", BGW_MAXLEN);
     strncpy(worker.bgw_library_name, "scheduler", BGW_MAXLEN);
     strncpy(worker.bgw_name, "PostgreSQL Job Scheduler", BGW_MAXLEN);
@@ -244,57 +257,109 @@ PGDLLEXPORT void scheduler_main(Datum main_arg) {
     char *conninfo;
     PGconn *conn = NULL;
     
-    /* Allow signal handling */
-    BackgroundWorkerUnblockSignals();
+    /* Store current settings to detect changes on reload */
+    char *prev_database = pstrdup(scheduler_database);
+    char *prev_wake_interval = pstrdup(scheduler_wake_interval);
 
+    /* Establish signal handlers before unblocking signals */
+	pqsignal(SIGHUP, SignalHandlerForConfigReload);
+    /* Clean shutdown handler */
+    pqsignal(SIGTERM, die);
+    
+    /* Allow background worker to handle signals */
+    BackgroundWorkerUnblockSignals();
+    
     /* Validate process context */
     if (MyProc == NULL) {
         elog(ERROR, "[scheduler] Missing process context");
         proc_exit(1);
     }
 
-    /* Initialize process latch */
+    /* Initialize process latch for event waiting */
     InitLatch(&MyProc->procLatch);
     elog(LOG, "[scheduler] Starting (database=%s, interval=%s)",
          scheduler_database, scheduler_wake_interval);
 
-    /* Build connection string */
+    /* Build connection string for target database */
     conninfo = psprintf("dbname='%s'", scheduler_database);
 
     /* Main scheduler loop */
     for (;;) {
-        /* Handle shutdown requests */
+        /* Critical interrupt check point */
         if (ProcDiePending) {
             elog(LOG, "[scheduler] Shutting down");
             if (conn) PQfinish(conn);
             pfree(conninfo);
+            pfree(prev_database);
+            pfree(prev_wake_interval);
             proc_exit(0);
+        }
+
+        /* Handle configuration reload requests */
+        if (ConfigReloadPending) {
+            ConfigReloadPending = false;
+            elog(LOG, "[scheduler] Reloading configuration");
+            
+            // Read config
+            ProcessConfigFile(PGC_SIGHUP);
+            
+            // Check interval change
+            if (strcmp(prev_wake_interval, scheduler_wake_interval) != 0) {
+                pfree(prev_wake_interval);
+                /* Update stored interval setting */
+                prev_wake_interval = pstrdup(scheduler_wake_interval);
+                parse_wake_interval();
+                elog(LOG, "[scheduler] Wake interval updated to '%s'", 
+                     scheduler_wake_interval);
+            }
+            
+            // Check db change
+            if (strcmp(prev_database, scheduler_database) != 0) {
+                pfree(prev_database);
+                /* Update stored database setting */
+                prev_database = pstrdup(scheduler_database);
+                elog(LOG, "[scheduler] Database changed to '%s'", 
+                     scheduler_database);
+                
+                pfree(conninfo);
+                /* Rebuild connection string with new database */
+                conninfo = psprintf("dbname='%s'", scheduler_database);
+                
+                if (conn) {
+                    /* Close existing connection to old database */
+                    PQfinish(conn);
+                    conn = NULL;
+                }
+            }
         }
 
         /* Calculate sleep time with 10ms minimum */
         long sleep_ms = current_sleep_us / 1000;
         if (sleep_ms < 10) sleep_ms = 10;
 
-        /* Wait for events */
+        /* Wait for events with interrupt checks */
         event = WaitLatch(&MyProc->procLatch,
                           WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
                           sleep_ms,
-                          0);
+                          PG_WAIT_EXTENSION);
 
         /* Handle postmaster termination */
         if (event & WL_POSTMASTER_DEATH) {
             elog(LOG, "[scheduler] Postmaster terminated");
             if (conn) PQfinish(conn);
             pfree(conninfo);
+            pfree(prev_database);
+            pfree(prev_wake_interval);
             proc_exit(1);
         }
 
-        /* Reset latch if triggered */
-        if (event & WL_LATCH_SET) {
-            ResetLatch(&MyProc->procLatch);
-        }
+        /* Reset latch for next wait cycle */
+        ResetLatch(&MyProc->procLatch);
+        
+        /* Process any pending interrupts */
+        CHECK_FOR_INTERRUPTS();
 
-        /* Establish database connection */
+        /* Establish/reconnect database connection */
         if (conn == NULL || PQstatus(conn) != CONNECTION_OK) {
             if (conn) {
                 elog(WARNING, "[scheduler] Connection lost: %s", PQerrorMessage(conn));
@@ -308,24 +373,26 @@ PGDLLEXPORT void scheduler_main(Datum main_arg) {
                 elog(WARNING, "[scheduler] Connection failed: %s", PQerrorMessage(conn));
                 PQfinish(conn);
                 conn = NULL;
-                current_sleep_us = 60 * 1000000L;  /* Retry after 60s */
+                /* Retry after 60s on connection failure */
+                current_sleep_us = 60 * 1000000L;
                 continue;
             }
             
-            /* Configure notice handling */
+            /* Configure notice processor for connection logs */
             PQsetNoticeProcessor(conn, notice_processor, NULL);
             elog(LOG, "[scheduler] Connection established");
         }
 
         PGresult *res;
         
-        /* Begin transaction block */
+        /* Begin transaction block for job processing */
         res = PQexec(conn, "BEGIN");
         if (PQresultStatus(res) != PGRES_COMMAND_OK) {
             elog(WARNING, "[scheduler] BEGIN failed: %s", PQerrorMessage(conn));
             PQclear(res);
             PQfinish(conn);
             conn = NULL;
+            /* Retry after 60s on transaction failure */
             current_sleep_us = 60 * 1000000L;
             continue;
         }
@@ -342,6 +409,7 @@ PGDLLEXPORT void scheduler_main(Datum main_arg) {
             continue;
         }
         
+        /* Handle missing scheduler schema */
         if (PQntuples(res) == 0) {
             elog(WARNING, 
                  "[scheduler] Schema 'scheduler' missing in database '%s'", 
@@ -369,14 +437,20 @@ PGDLLEXPORT void scheduler_main(Datum main_arg) {
             continue;
         }
 
-        /* Process due jobs */
+        /* Process due jobs with interrupt checks */
         int job_count = PQntuples(res);
         if (job_count > 0) {
             elog(LOG, "[scheduler] Found %d due job(s)", job_count);
         }
 
         for (int i = 0; i < job_count; i++) {
+            /* Critical interrupt check before each job */
+            if (ProcDiePending) {
+                break;
+            }
+            
             char *job_id = PQgetvalue(res, i, 0);
+            /* Build execution command for current job */
             char *exec_sql = psprintf("SELECT scheduler.execute_job(%s)", job_id);
             
             elog(DEBUG1, "[scheduler] Executing job %s", job_id);
@@ -390,23 +464,27 @@ PGDLLEXPORT void scheduler_main(Datum main_arg) {
             pfree(exec_sql);
             
             /* Check for shutdown between jobs */
-            if (ProcDiePending) break;
+            if (ProcDiePending) {
+                break;
+            }
         }
         
         PQclear(res);
         
-        /* Commit transaction */
+        /* Finalize transaction */
         res = PQexec(conn, "COMMIT");
         if (PQresultStatus(res) != PGRES_COMMAND_OK) {
             elog(WARNING, "[scheduler] COMMIT failed: %s", PQerrorMessage(conn));
         }
         PQclear(res);
         
-        /* Reset sleep interval */
+        /* Reset sleep interval after successful cycle */
         current_sleep_us = scheduler_sleep_us;
     }
     
     /* Cleanup (should never reach here) */
     if (conn) PQfinish(conn);
     pfree(conninfo);
+    pfree(prev_database);
+    pfree(prev_wake_interval);
 }
