@@ -1,4 +1,4 @@
-**PostgreSQL Job Scheduler Extension**
+# PostgreSQL Job Scheduler Extension
 
 `pg_scheduler` is a PostgreSQL extension that enables flexible scheduling and execution of SQL and shell jobs directly within your database.
 
