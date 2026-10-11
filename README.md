@@ -19,7 +19,7 @@ Supported PostgreSQL versions: **14, 15, 16, 17 and 18** (the build is exercised
 
 ## Prerequisites
 
-* PostgreSQL 14 - 18
+* PostgreSQL 14-18
 * C compiler
 * PostgreSQL server development headers and libraries
 
