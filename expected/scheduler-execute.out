@@ -1,0 +1,198 @@
+-- ============================================================
+-- scheduler-execute: job execution, retries, logs and cascade
+-- ============================================================
+\set VERBOSITY terse
+SET TIME ZONE 'UTC';
+SET datestyle TO ISO, MDY;
+SET intervalstyle TO postgres;
+DELETE FROM scheduler.job_logs;
+DELETE FROM scheduler.jobs;
+CREATE TABLE scheduler.exec_target(x INT);
+-- 1. Successful SQL job inserts a row and logs success
+SELECT scheduler.add_or_update_job('exec_sql', 'sql', 'INSERT INTO scheduler.exec_target VALUES (1)', '1 hour', NULL, 3);
+NOTICE:  Job "exec_sql" created successfully
+ add_or_update_job 
+-------------------
+ created
+(1 row)
+
+SELECT scheduler.execute_job((SELECT job_id FROM scheduler.jobs WHERE job_name = 'exec_sql'));
+ execute_job 
+-------------
+ 
+(1 row)
+
+SELECT count(*) AS rows_inserted FROM scheduler.exec_target;
+ rows_inserted 
+---------------
+             1
+(1 row)
+
+SELECT status, message, duration IS NOT NULL AS has_duration
+  FROM scheduler.job_logs l JOIN scheduler.jobs j USING (job_id)
+  WHERE j.job_name = 'exec_sql';
+ status | message | has_duration 
+--------+---------+--------------
+ t      | Success | t
+(1 row)
+
+-- 2. A successful run resets current_attempts to zero
+UPDATE scheduler.jobs SET current_attempts = 5 WHERE job_name = 'exec_sql';
+SELECT scheduler.execute_job((SELECT job_id FROM scheduler.jobs WHERE job_name = 'exec_sql'));
+ execute_job 
+-------------
+ 
+(1 row)
+
+SELECT current_attempts FROM scheduler.jobs WHERE job_name = 'exec_sql';
+ current_attempts 
+------------------
+                0
+(1 row)
+
+-- 3. A failing SQL job records the error and retries until disabled
+SELECT scheduler.add_or_update_job('exec_fail', 'sql', 'SELECT 1/0', NULL, NULL, 2);
+NOTICE:  Job "exec_fail" created successfully
+ add_or_update_job 
+-------------------
+ created
+(1 row)
+
+SELECT scheduler.execute_job((SELECT job_id FROM scheduler.jobs WHERE job_name = 'exec_fail'));
+ execute_job 
+-------------
+ 
+(1 row)
+
+SELECT current_attempts, enabled, last_status
+  FROM scheduler.jobs WHERE job_name = 'exec_fail';
+ current_attempts | enabled | last_status 
+------------------+---------+-------------
+                1 | t       | f
+(1 row)
+
+SELECT scheduler.execute_job((SELECT job_id FROM scheduler.jobs WHERE job_name = 'exec_fail'));
+ execute_job 
+-------------
+ 
+(1 row)
+
+SELECT current_attempts, enabled, last_status
+  FROM scheduler.jobs WHERE job_name = 'exec_fail';
+ current_attempts | enabled | last_status 
+------------------+---------+-------------
+                2 | f       | f
+(1 row)
+
+SELECT message FROM scheduler.job_logs l JOIN scheduler.jobs j USING (job_id)
+  WHERE j.job_name = 'exec_fail' ORDER BY l.log_id;
+     message      
+------------------
+ division by zero
+ division by zero
+(2 rows)
+
+-- 4. Disabled jobs are skipped and produce no log row
+SELECT scheduler.add_or_update_job('exec_off', 'sql', 'INSERT INTO scheduler.exec_target VALUES (99)', '1 hour', NULL, 3);
+NOTICE:  Job "exec_off" created successfully
+ add_or_update_job 
+-------------------
+ created
+(1 row)
+
+SELECT scheduler.toggle_job('exec_off', FALSE);
+ toggle_job 
+------------
+ 
+(1 row)
+
+SET client_min_messages = warning;
+SELECT scheduler.execute_job((SELECT job_id FROM scheduler.jobs WHERE job_name = 'exec_off'));
+ execute_job 
+-------------
+ 
+(1 row)
+
+RESET client_min_messages;
+SELECT count(*) AS off_logs FROM scheduler.job_logs l JOIN scheduler.jobs j USING (job_id)
+  WHERE j.job_name = 'exec_off';
+ off_logs 
+----------
+        0
+(1 row)
+
+SELECT count(*) AS target_rows FROM scheduler.exec_target;
+ target_rows 
+-------------
+           2
+(1 row)
+
+-- 5. Executing an unknown job id raises an error
+SELECT scheduler.execute_job(999999);
+ERROR:  Job 999999 not found
+-- 6. Shell jobs and the shell helper
+SELECT scheduler.add_or_update_job('exec_shell', 'shell', 'true', NULL, NULL, 3);
+NOTICE:  Job "exec_shell" created successfully
+ add_or_update_job 
+-------------------
+ created
+(1 row)
+
+SELECT scheduler.execute_job((SELECT job_id FROM scheduler.jobs WHERE job_name = 'exec_shell'));
+ execute_job 
+-------------
+ 
+(1 row)
+
+SELECT status, message FROM scheduler.job_logs l JOIN scheduler.jobs j USING (job_id)
+  WHERE j.job_name = 'exec_shell';
+ status | message 
+--------+---------
+ t      | Success
+(1 row)
+
+SELECT scheduler.execute_shell_command('true');
+ execute_shell_command 
+-----------------------
+ 
+(1 row)
+
+-- 7. Deleting a job cascades to its logs
+SELECT count(*) AS total_logs_before FROM scheduler.job_logs;
+ total_logs_before 
+-------------------
+                 5
+(1 row)
+
+SELECT scheduler.delete_job('exec_fail');
+ delete_job 
+------------
+ 
+(1 row)
+
+SELECT count(*) AS total_logs_after FROM scheduler.job_logs;
+ total_logs_after 
+------------------
+                3
+(1 row)
+
+-- cleanup
+DROP TABLE scheduler.exec_target;
+SELECT scheduler.delete_job('exec_sql');
+ delete_job 
+------------
+ 
+(1 row)
+
+SELECT scheduler.delete_job('exec_shell');
+ delete_job 
+------------
+ 
+(1 row)
+
+SELECT scheduler.delete_job('exec_off');
+ delete_job 
+------------
+ 
+(1 row)
+

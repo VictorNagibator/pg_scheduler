@@ -1,6 +1,10 @@
 # PostgreSQL Job Scheduler Extension
 
+[![CI](https://github.com/VictorNagibator/pg_scheduler/actions/workflows/ci.yml/badge.svg)](https://github.com/VictorNagibator/pg_scheduler/actions/workflows/ci.yml)
+
 `pg_scheduler` is a PostgreSQL extension that enables flexible scheduling and execution of SQL and shell jobs directly within your database.
+
+Supported PostgreSQL versions: **14, 15, 16, 17 and 18** (the build is exercised on every one of them by CI).
 
 ## Features
 
@@ -15,7 +19,7 @@
 
 ## Prerequisites
 
-* PostgreSQL
+* PostgreSQL 14 - 18
 * C compiler
 * PostgreSQL server development headers and libraries
 
@@ -181,14 +185,28 @@ WHERE job_id = (SELECT job_id FROM scheduler.jobs WHERE job_name = 'cleanup_old_
 ORDER BY run_time DESC;
 ```
 
-## Running Regression Tests
+## Testing
 
-A `scheduler-test.sql` script is provided for regression tests. To execute it:
+The extension ships two kinds of tests:
+
+* **Regression tests** (`sql/*.sql` + `expected/*.out`) driven by
+  `pg_regress`. They cover the public API, the `next_run` scheduling
+  triggers and the execution/retry logic.
+  * `scheduler-test` - core add/update/toggle/delete and execution logging.
+  * `scheduler-api` - job definition API and table constraints.
+  * `scheduler-schedule` - `next_run` computation and the `updated_at` trigger.
+  * `scheduler-execute` - execution, failure/retry, disable and log cascade.
+* **TAP tests** (`t/*.pl`) driven by `prove`. They start a real cluster with
+  `shared_preload_libraries = 'scheduler'` and check that the background
+  worker dispatches due jobs, retries failures, respects disabled jobs and
+  reacts to configuration reloads.
+
+Install the extension and run both suites against a running server:
 
 ```sh
+make USE_PGXS=1 install
 make USE_PGXS=1 installcheck
 ```
 
-**Note**: Ensure that `pg_config` is in your `PATH`, so that make `USE_PGXS=1` can locate PostgreSQL build settings.
-
-This will run `pg_regress` with the test script to validate correct behavior.
+**Note**: Ensure that `pg_config` is in your `PATH`, so that `make USE_PGXS=1`
+can locate PostgreSQL build settings.

@@ -1,0 +1,16 @@
+# Build artifacts
+*.o
+*.so
+*.bc
+*.a
+
+# Regression test output
+/results/
+/regression.diffs
+/regression.out
+
+# TAP / isolation test scratch directories
+/tmp_check/
+/tmp_check_iso/
+/log/
+/output_iso/

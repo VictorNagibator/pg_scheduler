@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: PostgreSQL ${{ matrix.pg }}
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [14, 15, 16, 17, 18]
+
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: postgres
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install PostgreSQL ${{ matrix.pg }} from PGDG
+        run: |
+          sudo sh -c 'echo "deb https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            postgresql-${{ matrix.pg }} \
+            postgresql-client-${{ matrix.pg }} \
+            postgresql-server-dev-${{ matrix.pg }} \
+            libpq-dev \
+            libipc-run-perl
+
+      - name: Configure PostgreSQL environment
+        run: |
+          echo "PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config" >> "$GITHUB_ENV"
+          echo "/usr/lib/postgresql/${{ matrix.pg }}/bin" >> "$GITHUB_PATH"
+
+      - name: Build extension
+        run: make USE_PGXS=1 PG_CONFIG="$PG_CONFIG"
+
+      - name: Install extension
+        run: sudo make USE_PGXS=1 PG_CONFIG="$PG_CONFIG" install
+
+      - name: Start PostgreSQL and relax authentication
+        run: |
+          if [ ! -d "/etc/postgresql/${{ matrix.pg }}/main" ]; then
+            sudo pg_createcluster ${{ matrix.pg }} main --start
+          else
+            sudo pg_ctlcluster ${{ matrix.pg }} main start || true
+          fi
+          HBA="/etc/postgresql/${{ matrix.pg }}/main/pg_hba.conf"
+          sudo sed -i '1i local all all trust\nhost all all 127.0.0.1/32 trust\nhost all all ::1/128 trust' "$HBA"
+          sudo pg_ctlcluster ${{ matrix.pg }} main reload
+          pg_isready -h 127.0.0.1 -p 5432
+
+      - name: Run regression and TAP tests
+        run: make USE_PGXS=1 PG_CONFIG="$PG_CONFIG" installcheck

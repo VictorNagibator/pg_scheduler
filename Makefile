@@ -11,10 +11,13 @@ SHLIB_LINK = -lpq
 
 PG_CPPFLAGS = -I$(shell pg_config --includedir) -I.
 
-REGRESS = scheduler-test
+REGRESS = scheduler-test scheduler-api scheduler-schedule scheduler-execute
 REGRESS_OPTS = \
     --inputdir=./ \
     --load-extension=scheduler
+
+# Enable TAP tests (t/*.pl) that exercise the background worker end to end.
+TAP_TESTS = 1
 
 ifdef USE_PGXS
 PG_CONFIG = pg_config

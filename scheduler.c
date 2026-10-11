@@ -18,7 +18,13 @@
 #include "postmaster/interrupt.h"
 #include "utils/guc.h"
 #include "utils/elog.h"
-#include "utils/wait_event_types.h"
+/*
+ * PG_WAIT_EXTENSION lives in utils/wait_event.h until PostgreSQL 17 and in
+ * utils/wait_classes.h from 18 on.  pgstat.h re-exports utils/wait_event.h
+ * on every supported branch, so including it keeps the extension portable
+ * across PostgreSQL 14 - 18.
+ */
+#include "pgstat.h"
 #include "storage/latch.h"
 #include "storage/proc.h"
 #include "storage/ipc.h"
@@ -29,6 +35,10 @@
 #include <limits.h>
 #include <string.h>
 #include <errno.h>
+
+#if PG_VERSION_NUM < 140000
+#error "scheduler extension requires PostgreSQL 14 or newer"
+#endif
 
 PG_MODULE_MAGIC;
 
@@ -66,8 +76,13 @@ static void notice_processor(void *arg, const char *message) {
  */
 static void parse_wake_interval(void) {
     char *endptr;
+    long long sec;
+    const int64 US_PER_SEC = 1000000;
+    int64 micros = 0;
+    bool overflow = false;
+
     errno = 0;  // Reset errno before call
-    long long sec = strtoll(scheduler_wake_interval, &endptr, 10);
+    sec = strtoll(scheduler_wake_interval, &endptr, 10);
     
     // Handle parsing errors and negative values
     if (errno == ERANGE || endptr == scheduler_wake_interval || sec < 0) {
@@ -77,10 +92,6 @@ static void parse_wake_interval(void) {
         return;
     }
     
-    const int64 US_PER_SEC = 1000000;
-    int64 micros = 0;
-    bool overflow = false;
-
     /* Handle different interval units with overflow protection */
     if (strcmp(endptr, "s") == 0 || *endptr == '\0') {
         // Check for overflow: sec * US_PER_SEC > INT64_MAX
@@ -189,13 +200,13 @@ static void parse_wake_interval(void) {
  * the shared library is loaded by PostgreSQL (shared_preload_libraries = 'scheduler'). 
  */
 void _PG_init(void) {
+    BackgroundWorker worker;
+
     /* Require loading via shared_preload_libraries */
     if (!process_shared_preload_libraries_in_progress) {
         elog(WARNING, "scheduler module must be loaded via shared_preload_libraries");
         return;
     }
-
-    BackgroundWorker worker;
 
     /* Register GUC parameters */
     DefineCustomStringVariable(
@@ -285,6 +296,18 @@ PGDLLEXPORT void scheduler_main(Datum main_arg) {
 
     /* Main scheduler loop */
     for (;;) {
+        long sleep_ms;
+        PGresult *res;
+        const char *check_schema = "SELECT 1 FROM pg_namespace WHERE nspname = 'scheduler'";
+        const char *get_jobs =
+            "SELECT job_id "
+            "FROM scheduler.jobs "
+            "WHERE enabled AND next_run <= NOW() "
+            "ORDER BY next_run "
+            "FOR UPDATE SKIP LOCKED";
+        int job_count;
+        int i;
+
         /* Critical interrupt check point */
         if (ProcDiePending) {
             elog(LOG, "[scheduler] Shutting down");
@@ -334,7 +357,7 @@ PGDLLEXPORT void scheduler_main(Datum main_arg) {
         }
 
         /* Calculate sleep time with 10ms minimum */
-        long sleep_ms = current_sleep_us / 1000;
+        sleep_ms = current_sleep_us / 1000;
         if (sleep_ms < 10) sleep_ms = 10;
 
         /* Wait for events with interrupt checks */
@@ -383,8 +406,6 @@ PGDLLEXPORT void scheduler_main(Datum main_arg) {
             elog(LOG, "[scheduler] Connection established");
         }
 
-        PGresult *res;
-        
         /* Begin transaction block for job processing */
         res = PQexec(conn, "BEGIN");
         if (PQresultStatus(res) != PGRES_COMMAND_OK) {
@@ -399,7 +420,6 @@ PGDLLEXPORT void scheduler_main(Datum main_arg) {
         PQclear(res);
 
         /* Verify scheduler schema exists */
-        const char *check_schema = "SELECT 1 FROM pg_namespace WHERE nspname = 'scheduler'";
         res = PQexec(conn, check_schema);
         if (PQresultStatus(res) != PGRES_TUPLES_OK) {
             elog(WARNING, "[scheduler] Schema check failed: %s", PQerrorMessage(conn));
@@ -422,13 +442,6 @@ PGDLLEXPORT void scheduler_main(Datum main_arg) {
         PQclear(res);
 
         /* Retrieve due jobs using SKIP LOCKED */
-        const char *get_jobs = 
-            "SELECT job_id "
-            "FROM scheduler.jobs "
-            "WHERE enabled AND next_run <= NOW() "
-            "ORDER BY next_run "
-            "FOR UPDATE SKIP LOCKED";
-        
         res = PQexec(conn, get_jobs);
         if (PQresultStatus(res) != PGRES_TUPLES_OK) {
             elog(WARNING, "[scheduler] Job fetch failed: %s", PQerrorMessage(conn));
@@ -438,23 +451,26 @@ PGDLLEXPORT void scheduler_main(Datum main_arg) {
         }
 
         /* Process due jobs with interrupt checks */
-        int job_count = PQntuples(res);
+        job_count = PQntuples(res);
         if (job_count > 0) {
             elog(LOG, "[scheduler] Found %d due job(s)", job_count);
         }
 
-        for (int i = 0; i < job_count; i++) {
+        for (i = 0; i < job_count; i++) {
+            char *job_id = PQgetvalue(res, i, 0);
+            char *exec_sql;
+            PGresult *exec_res;
+
             /* Critical interrupt check before each job */
             if (ProcDiePending) {
                 break;
             }
-            
-            char *job_id = PQgetvalue(res, i, 0);
+
             /* Build execution command for current job */
-            char *exec_sql = psprintf("SELECT scheduler.execute_job(%s)", job_id);
-            
+            exec_sql = psprintf("SELECT scheduler.execute_job(%s)", job_id);
+
             elog(DEBUG1, "[scheduler] Executing job %s", job_id);
-            PGresult *exec_res = PQexec(conn, exec_sql);
+            exec_res = PQexec(conn, exec_sql);
             
             if (PQresultStatus(exec_res) != PGRES_TUPLES_OK) {
                 elog(WARNING, "[scheduler] Job %s failed: %s", job_id, PQerrorMessage(conn));

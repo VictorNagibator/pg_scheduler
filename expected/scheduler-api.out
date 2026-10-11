@@ -1,0 +1,130 @@
+-- ============================================================
+-- scheduler-api: job definition API and table constraints
+-- ============================================================
+\set VERBOSITY terse
+SET TIME ZONE 'UTC';
+SET datestyle TO ISO, MDY;
+SET intervalstyle TO postgres;
+DELETE FROM scheduler.job_logs;
+DELETE FROM scheduler.jobs;
+-- 1. Create a recurring job without a start time
+SELECT scheduler.add_or_update_job('api_recur', 'sql', 'SELECT 1', '1 hour', NULL, 3);
+NOTICE:  Job "api_recur" created successfully
+ add_or_update_job 
+-------------------
+ created
+(1 row)
+
+SELECT job_name, job_type, command, schedule_interval, max_attempts, enabled, current_attempts
+  FROM scheduler.jobs WHERE job_name = 'api_recur';
+ job_name  | job_type | command  | schedule_interval | max_attempts | enabled | current_attempts 
+-----------+----------+----------+-------------------+--------------+---------+------------------
+ api_recur | sql      | SELECT 1 | 01:00:00          |            3 | t       |                0
+(1 row)
+
+-- 2. Updating an existing job resets runtime state and re-enables it
+SELECT scheduler.toggle_job('api_recur', FALSE);
+ toggle_job 
+------------
+ 
+(1 row)
+
+SELECT scheduler.add_or_update_job('api_recur', 'shell', 'echo hi', '30 minutes', NULL, 5);
+NOTICE:  Job "api_recur" updated successfully
+ add_or_update_job 
+-------------------
+ updated
+(1 row)
+
+SELECT job_type, command, schedule_interval, max_attempts, enabled, current_attempts
+  FROM scheduler.jobs WHERE job_name = 'api_recur';
+ job_type | command | schedule_interval | max_attempts | enabled | current_attempts 
+----------+---------+-------------------+--------------+---------+------------------
+ shell    | echo hi | 00:30:00          |            5 | t       |                0
+(1 row)
+
+-- 3. One-time job with a fixed future start time
+SELECT scheduler.add_or_update_job('api_once', 'shell', 'true', NULL, '2030-01-01 00:00:00+00', 1);
+NOTICE:  Job "api_once" created successfully
+ add_or_update_job 
+-------------------
+ created
+(1 row)
+
+SELECT schedule_interval IS NULL AS no_interval,
+       schedule_time,
+       max_attempts,
+       next_run = schedule_time AS next_run_matches
+  FROM scheduler.jobs WHERE job_name = 'api_once';
+ no_interval |     schedule_time      | max_attempts | next_run_matches 
+-------------+------------------------+--------------+------------------
+ t           | 2030-01-01 00:00:00+00 |            1 | t
+(1 row)
+
+-- 4. Disabling a job clears next_run, enabling recomputes it
+SELECT scheduler.toggle_job('api_once', FALSE);
+ toggle_job 
+------------
+ 
+(1 row)
+
+SELECT enabled, next_run IS NULL AS next_run_null
+  FROM scheduler.jobs WHERE job_name = 'api_once';
+ enabled | next_run_null 
+---------+---------------
+ f       | t
+(1 row)
+
+SELECT scheduler.toggle_job('api_once', TRUE);
+ toggle_job 
+------------
+ 
+(1 row)
+
+SELECT enabled, next_run IS NOT NULL AS next_run_set
+  FROM scheduler.jobs WHERE job_name = 'api_once';
+ enabled | next_run_set 
+---------+--------------
+ t       | t
+(1 row)
+
+-- 5. Unknown job names raise a clear error
+SELECT scheduler.toggle_job('nope', FALSE);
+ERROR:  Job "nope" not found
+SELECT scheduler.delete_job('nope');
+ERROR:  Job "nope" not found
+-- 6. Table constraints are enforced
+INSERT INTO scheduler.jobs(job_name, job_type, command) VALUES ('api_bad_type', 'python', 'x');
+ERROR:  new row for relation "jobs" violates check constraint "jobs_job_type_check"
+INSERT INTO scheduler.jobs(job_name, job_type, command) VALUES ('api_recur', 'sql', 'x');
+ERROR:  duplicate key value violates unique constraint "jobs_job_name_key"
+INSERT INTO scheduler.jobs(job_name, command) VALUES ('api_no_type', 'x');
+ERROR:  null value in column "job_type" of relation "jobs" violates not-null constraint
+-- 7. Deleting a job cascades to its execution logs
+INSERT INTO scheduler.job_logs(job_id, status, message)
+  SELECT job_id, TRUE, 'pre' FROM scheduler.jobs WHERE job_name = 'api_recur';
+SELECT count(*) AS logs_before FROM scheduler.job_logs;
+ logs_before 
+-------------
+           1
+(1 row)
+
+SELECT scheduler.delete_job('api_recur');
+ delete_job 
+------------
+ 
+(1 row)
+
+SELECT count(*) AS logs_after FROM scheduler.job_logs;
+ logs_after 
+------------
+          0
+(1 row)
+
+-- cleanup
+SELECT scheduler.delete_job('api_once');
+ delete_job 
+------------
+ 
+(1 row)
+
