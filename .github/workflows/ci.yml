@@ -20,7 +20,6 @@ jobs:
 
     env:
       PGHOST: 127.0.0.1
-      PGPORT: "5432"
       PGUSER: postgres
 
     steps:
@@ -53,15 +52,22 @@ jobs:
 
       - name: Start PostgreSQL and relax authentication
         run: |
-          if [ ! -d "/etc/postgresql/${{ matrix.pg }}/main" ]; then
-            sudo pg_createcluster ${{ matrix.pg }} main --start
+          VER=${{ matrix.pg }}
+          if [ ! -d "/etc/postgresql/$VER/main" ]; then
+            sudo pg_createcluster "$VER" main --start
           else
-            sudo pg_ctlcluster ${{ matrix.pg }} main start || true
+            sudo pg_ctlcluster "$VER" main start || true
           fi
-          HBA="/etc/postgresql/${{ matrix.pg }}/main/pg_hba.conf"
+          HBA="/etc/postgresql/$VER/main/pg_hba.conf"
           sudo sed -i '1i local all all trust\nhost all all 127.0.0.1/32 trust\nhost all all ::1/128 trust' "$HBA"
-          sudo pg_ctlcluster ${{ matrix.pg }} main reload
-          pg_isready -h 127.0.0.1 -p 5432
+          sudo pg_ctlcluster "$VER" main reload
+          # The runner image may already ship another PostgreSQL cluster, which
+          # makes pg_createcluster pick a port other than 5432. Use whatever
+          # port this cluster actually listens on.
+          PORT=$(pg_lsclusters | awk -v v="$VER" '$1 == v && $2 == "main" { print $3 }')
+          echo "PGPORT=$PORT" >> "$GITHUB_ENV"
+          echo ">>> PostgreSQL $VER is listening on 127.0.0.1:$PORT"
+          pg_isready -h 127.0.0.1 -p "$PORT"
 
       - name: Run regression and TAP tests
         run: make USE_PGXS=1 PG_CONFIG="$PG_CONFIG" installcheck
